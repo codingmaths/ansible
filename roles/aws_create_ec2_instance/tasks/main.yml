@@ -1,0 +1,131 @@
+---
+- name: GET VPC detail
+  ec2_vpc_net_facts:
+    region: "{{ aws_region_name }}"
+    filters:
+      'tag:Name': "{{ aws_vpc_name }}"
+  register: new_vpc_facts
+
+- name: Modify the VPC Security Group
+  ec2_group:
+    name: "{{ application }}-{{ environment }}-vpc-sg"
+    description: "VPC Security Group for {{ environment }}-{{ application }}"
+    region: "{{ aws_region_name }}"
+    vpc_id: "{{ new_vpc_facts.vpcs[0].id }}"
+    rules:
+      - proto: "{{ aws_https_protocol }}"
+        from_port: "{{ aws_https_port }}"
+        to_port: "{{ aws_https_port }}"
+        cidr_ip: "{{ aws_anywhere_cidr_block }}"
+      - proto: "{{ aws_http_protocol }}"
+        from_port: "{{ aws_http_port }}"
+        to_port: "{{ aws_http_port }}"
+        cidr_ip: "{{ aws_anywhere_cidr_block }}"
+  register: vpc_security_group_facts
+
+- name: check EC2 Instance Status
+  ec2_remote_facts:
+    region: "{{ aws_region_name }}"
+    filters:
+      instance-state-name: running
+      "tag:Name": "{{ org }}-{{ environment }}-{{ application }}-{{ type }}"
+  register: instance_out
+
+- debug:
+    var: instance_out.instances[0].id
+
+- name: Create a Security Group for Instances
+  ec2_group:
+    name: "{{ org }}-{{ environment }}-{{ application }}-server-sg"
+    description: "Security Group for {{ org }}-{{ environment }}-{{ application }}-server"
+    region: "{{ aws_region_name }}"
+    vpc_id: "{{ new_vpc_facts.vpcs[0].id }}"
+    rules:
+      - proto: "{{ aws_http_protocol }}"
+        from_port: "{{ aws_http_port }}"
+        to_port: "{{ aws_http_port }}"
+        group_id: "{{ vpc_security_group_facts.group_id }}"
+      - proto: "{{ aws_ssh_protocol }}"
+        from_port: "{{ aws_ssh_port }}"
+        to_port: "{{ aws_ssh_port }}"
+        cidr_ip: "{{ india_gw_ip }}"
+  register: ec2_security_group
+
+- name: "Create EC2 Instance for {{ application }}"
+  ec2:
+    instance_type: "{{ aws_ec2_instance_type }}"
+    image: "{{ aws_base_os_ami }}"
+    group_id: "{{ ec2_security_group.group_id }}"
+    wait: yes
+    count: 1
+    vpc_subnet_id: "{{ aws_vpc_subnet_id }}"
+    assign_public_ip: yes
+    region: "{{ aws_region_name }}"
+    instance_tags:
+      Name: "{{ org }}-{{ environment }}-{{ application }}-{{ type }}"
+      environment: "{{ environment }}"
+      application: "{{ application }}"
+      type: "{{ type }}"
+      org: "{{ org }}"
+    volumes:
+      - device_name: /dev/sda1
+        volume_type: gp2
+        volume_size: 128
+    key_name: "{{ aws_ec2_instance_key }}"
+  when: instance_out.instances[0].id is undefined 
+  register: ec2_instance_details
+
+- name: Register Load Balancer
+  ec2_elb_lb:
+    name: "{{ application }}-{{ org }}-{{ environment }}-elb"
+    region: "{{ aws_region_name }}"
+    cross_az_load_balancing: yes
+    security_group_ids: "{{ vpc_security_group_facts.group_id }}"
+    state: present
+    subnets:
+      - "{{ aws_vpc_subnet_id }}"
+    listeners:
+      - protocol: https
+        load_balancer_port: 443
+        instance_protocol: http # optional, defaults to value of protocol setting
+        instance_port: 80
+        ssl_certificate_id: "{{ aws_application_ssl_certificate }}"
+    health_check:
+      ping_protocol: tcp # options are http, https, ssl, tcp
+      ping_port: 80
+      response_timeout: 5 # seconds
+      interval: 30 # seconds
+      unhealthy_threshold: 10
+      healthy_threshold: 10
+  register: new_elb_facts
+
+- name: Register Instance with ELB
+  local_action:
+    module: ec2_elb
+    instance_id: "{{ ec2_instance_details.instance_ids[0] }}"
+    region: "{{ aws_region_name }}"
+    ec2_elbs: "{{ application }}-{{ org }}-{{ environment }}-elb"
+    state: present
+  with_items: ec2_elbs
+  when: instance_out.instances[0].id is undefined 
+
+- name: Register Instance with ELB
+  local_action:
+    module: ec2_elb
+    instance_id: "{{ instance_out.instances[0].id }}"
+    region: "{{ aws_region_name }}"
+    ec2_elbs: "{{ application }}-{{ org }}-{{ environment }}-elb"
+    state: present
+  with_items: ec2_elbs
+  when: instance_out.instances[0].id is defined 
+
+- name: Add sub-domain CNAME record, point to the load balancer
+  route53:
+    command: create
+    overwrite: yes
+    zone: "{{ aws_dns_zone }}"
+    record: "{{ application }}-{{ environment }}.{{ aws_dns_zone }}"
+    type: CNAME
+    ttl: 7200
+    value: "{{ new_elb_facts.elb.dns_name }}"
+  register: sub_domain_facts

@@ -1,0 +1,12 @@
+---
+- name: "Suspend instance termination on ASG"
+  ec2_asg:
+    name: "{{ asgname }}"
+    suspend_processes: Terminate
+  when: terminate_asg == 'stop'
+
+- name: "Enable instance termination on ASG"
+  ec2_asg:
+    name: "{{ asgname }}"
+    suspend_processes: []
+  when: terminate_asg == 'start'

@@ -1,0 +1,101 @@
+---
+- name: GET VPC detail
+  ec2_vpc_net_facts:
+    region: "{{ aws_region_name }}"
+    filters:
+      'tag:Name': "{{ aws_vpc_name }}"
+  register: new_vpc_facts
+
+- name: Create a Security Group for RDS
+  ec2_group:
+    name: "{{ application }}-{{ environment }}-rds-security-group"
+    description: " Security Group for {{ application }}--{{ environment }}-RDS"
+    region: "{{ aws_region_name }}"
+    vpc_id: "{{ new_vpc_facts.vpc.id }}"
+    rules:
+      - proto: "{{ aws_database_protocol }}"
+        from_port: "{{ aws_database_port }}"
+        to_port: "{{ aws_database_port }}"
+        cidr_ip: "{{ aws_database_cidr }}"
+    purge_rules: true
+  register: rds_security_group
+
+- name: get the rds_security_group id
+  debug:
+    msg: "{{ rds_security_group.group_id }}"
+
+- name: Create RDS subnet in AZ 1
+  ec2_vpc_subnet:
+    state: present
+    region: "{{ aws_region_name }}"
+    vpc_id: "{{ new_vpc_facts.vpc.id }}"
+    az: "{{ aws_vpc_az_1 }}"
+    cidr: "{{ aws_vpc_rds_subnet_1_cidr_block }}"
+    tags:
+      Name: "{{ application }}-{{ environment }}-rds-subnet-1"
+      environment: "{{ environment }}"
+      application: "{{ application }}"
+  register: rds_subnet_az_1
+
+- name: Create RDS subnet in AZ 2
+  ec2_vpc_subnet:
+    state: present
+    region: "{{ aws_region_name }}"
+    vpc_id: "{{ new_vpc_facts.vpc.id }}"
+    az: "{{ aws_vpc_az_2 }}"
+    cidr: "{{ aws_vpc_rds_subnet_2_cidr_block }}"
+    tags:
+      Name: "{{ application }}-{{ environment }}-rds-subnet-2"
+      environment: "{{ environment }}"
+      application: "{{ application }}"
+  register: rds_subnet_az_2
+
+- name: Create RDS subnet in AZ 3
+  ec2_vpc_subnet:
+    state: present
+    region: "{{ aws_region_name }}"
+    vpc_id: "{{ new_vpc_facts.vpc.id }}"
+    az: "{{ aws_vpc_az_3 }}"
+    cidr: "{{ aws_vpc_rds_subnet_3_cidr_block }}"
+    tags:
+      Name: "{{ application }}-{{ environment }}-rds-subnet-3"
+      environment: "{{ environment }}"
+      application: "{{ application }}"
+  register: rds_subnet_az_3
+
+- name: Create RDS subnet group
+  rds_subnet_group:
+    state: present
+    name: "{{ application }}-{{ environment }}-rds-subnet-group"
+    description: "{{ application }}-{{ environment }} RDS Subnet Group"
+    region: "{{ aws_region_name }}"
+    subnets:
+      - "{{ rds_subnet_az_1.subnet.id }}"
+      - "{{ rds_subnet_az_2.subnet.id }}"
+      - "{{ rds_subnet_az_3.subnet.id }}"
+  register: new_rds_subnet_group
+
+- name: "Create New RDS for {{ environment }}"
+  rds:
+    command: create
+    instance_name:  "{{ rds_instance_name }}"
+    db_engine: "{{ database_engine }}"
+    size: "{{ size }}"
+    backup_retention: 7
+    instance_type: "{{ rds_instance_type }}"
+    username: "{{ databse_master_username }}"
+    password: "{{ password }}"
+    region: "{{ aws_region_name }}"
+    db_name: "{{ master_database_name }}"
+    subnet: "{{ application }}-{{ environment }}-rds-subnet-group"
+    vpc_security_groups: "{{ rds_security_group.group_id }}"
+    tags:
+      environment: "{{ environment }}"
+      application: "{{ application }}"
+    wait: yes
+    wait_timeout: 1200
+  register: new_database_facts
+
+- name: Get the RDS endpoint
+  debug: 
+    msg: "The new db endpoint is {{ new_database_facts.instance.endpoint }}"

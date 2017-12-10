@@ -1,0 +1,97 @@
+---
+- name: Get subnet fact for AZ 1
+  ec2_vpc_subnet_facts:
+    filters:
+      vpc_id: "{{ new_vpc_facts.vpcs[0].id }}"
+      cidr: "{{ aws_vpc_asg_subnet_1_cidr_block }}"
+  register: ag_asg_subnet_az_1
+
+- name: Get the subnet fact for AZ 2
+  ec2_vpc_subnet_facts:
+    filters:
+      vpc_id: "{{ new_vpc_facts.vpcs[0].id }}"
+      cidr: "{{ aws_vpc_asg_subnet_2_cidr_block }}"
+  register: ag_asg_subnet_az_2
+
+- name: Modify the Auto Scaling Group
+  ec2_asg:
+    name: "{{ org }}-{{ environment }}-{{ application }}-auto-scaling-group"
+    launch_config_name: "{{ org }}-{{ environment }}-{{ hooq_version }}-{{ application }}-lc"
+    load_balancers: "{{ org }}-{{ environment }}-{{ application }}-elb"
+    health_check_period: "{{ aws_health_check_period }}"
+    region: "{{ aws_region_name }}"
+    health_check_type: ELB
+    replace_all_instances: yes
+    min_size: "{{ aws_backend_minumum_size }}"
+    max_size: "{{ aws_backend_maximum_size }}"
+    desired_capacity: "{{ aws_backend_desired_capacity }}"
+    vpc_zone_identifier: 
+      - "{{ ag_asg_subnet_az_1.subnets[0].id }}"
+      - "{{ ag_asg_subnet_az_2.subnets[0].id }}"
+    tags:
+      - Name: "{{ org }}-{{ environment }}-{{ application }}-auto-scaling-group"
+        propagate_at_launch: yes
+      - environment: "{{ environment }}"
+      - application: "{{ application }}"
+      - Entity: "{{ org }}"
+    wait_for_instances: True
+    wait_timeout: 1200
+  register: auto_scaling_group_updated
+
+- name: Get the ASG Name
+  debug:
+    msg: "{{ auto_scaling_group_updated.name }}"
+
+- name: Configure Scaling Policies
+  ec2_scaling_policy:
+    region: "{{ aws_region_name }}"
+    name: "{{ item.name }}"
+    asg_name: "{{ auto_scaling_group_updated.name }}"
+    state: present
+    adjustment_type: "{{ item.adjustment_type }}"
+    min_adjustment_step: "{{ item.min_adjustment_step }}"
+    scaling_adjustment: "{{ item.scaling_adjustment }}"
+    cooldown: "{{ item.cooldown }}"
+  with_items:
+    - name: "{{ auto_scaling_group_updated.name }}-increase-policy"
+      adjustment_type: "ChangeInCapacity"
+      scaling_adjustment: +1
+      min_adjustment_step: 1
+      cooldown: 300
+    - name: "{{ auto_scaling_group_updated.name}}-decrease-policy"
+      adjustment_type: "ChangeInCapacity"
+      scaling_adjustment: -1
+      min_adjustment_step: 1
+      cooldown: 300
+  register: sp_result
+
+- name: Configure Metric Alarms and link to Scaling Policies
+  ec2_metric_alarm:
+    region: "{{ aws_region_name }}"
+    name: "{{ item.name }}"
+    state: present
+    metric: "CPUUtilization"
+    namespace: "AWS/EC2"
+    statistic: "Average"
+    threshold: "{{ item.threshold }}"
+    comparison: "{{ item.comparison }}"
+    period: 300
+    evaluation_periods: 5
+    unit: "Percent"
+    dimensions:
+      AutoScalingGroupName: "{{ auto_scaling_group_updated.name }}"
+    alarm_actions: "{{ item.alarm_actions }}"
+  with_items:         #metric_alarms
+      - name: "{{ auto_scaling_group_updated.name }}-ScaleUp"
+        comparison: ">="
+        threshold: "{{ scaleup_threshold }}"
+        alarm_actions:
+          - "{{ sp_result.results[0].arn }}"
+      - name: "{{ auto_scaling_group_updated.name }}-ScaleDown"
+        comparison: "<="
+        threshold: "{{ scaledown_threshold }}"
+        alarm_actions:
+          - "{{ sp_result.results[1].arn }}"
+
+  #when: aws_backend_maximum_size  > 1
+  register: ma_result
