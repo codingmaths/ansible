@@ -1,0 +1,31 @@
+---
+- name: install epel-repo
+  yum: 
+    name: epel-release
+    state: present
+
+- name: install nginx
+  yum: 
+    name: nginx 
+    state: present
+
+- name: make nginx start on system boot
+  service: 
+    name: nginx 
+    enabled: yes
+
+- name: copy nginx.conf onto the server
+  copy: 
+    src: files/nginx.conf 
+    dest: /etc/nginx/nginx.conf
+
+- name: copy magento.conf onto the server
+  template:
+    src: templates/gowebserver.conf
+    dest: /etc/nginx/conf.d/gowebserver.conf
+
+- name: restart nginx
+  service:
+    name: nginx 
+    enabled: yes
+    state: restarted
